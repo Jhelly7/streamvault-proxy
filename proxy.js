@@ -107,7 +107,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Health check
-  if (req.url === '/health') {
+  const urlPath = req.url.split('?')[0];
+  if (urlPath === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, repo: `${GITHUB_OWNER}/${GITHUB_REPO}` }));
     return;
@@ -118,7 +119,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Parsear path: /{jobId}/{assetPath}
-  const parts = req.url.replace(/^\//, '').split('/');
+  const parts = urlPath.replace(/^\//, '').split('/');
   if (parts.length < 2) {
     res.writeHead(400); res.end('Bad Request'); return;
   }
