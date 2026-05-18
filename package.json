@@ -1,0 +1,17 @@
+{
+  "name": "streamvault-proxy",
+  "version": "1.0.0",
+  "description": "StreamVault Release Proxy — GitHub Release → Cloudflare CDN",
+  "type": "module",
+  "main": "proxy.js",
+  "scripts": {
+    "start": "node proxy.js",
+    "dev": "node --watch proxy.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
