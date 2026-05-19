@@ -1,9 +1,0 @@
-tunnel: 22e32a98-e000-4bb6-b05b-33bcacb0cb22
-credentials-file: /etc/cloudflared/creds.json
-protocol: http2
-ingress:
-  - hostname: tunnel.pixgo.qzz.io
-    service: http://localhost:8080
-  - hostname: cdn.pixgo.qzz.io
-    service: http://localhost:8080
-  - service: http_status:404
