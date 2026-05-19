@@ -1,9 +1,8 @@
 FROM node:20-alpine
 
-# Instalar cloudflared
 RUN apk add --no-cache curl && \
     curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-    -o /usr/local/bin/cloudflared && \
+      -o /usr/local/bin/cloudflared && \
     chmod +x /usr/local/bin/cloudflared
 
 WORKDIR /app
@@ -15,9 +14,8 @@ COPY proxy.js ./
 COPY start.sh ./
 RUN chmod +x start.sh
 
-EXPOSE 8080
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD wget -qO- http://localhost:${PORT:-8080}/health || exit 1
+# Configuração do tunnel — ingress rules apontam para localhost:8080
+RUN mkdir -p /etc/cloudflared
+COPY config.yml /etc/cloudflared/config.yml
 
 CMD ["./start.sh"]
