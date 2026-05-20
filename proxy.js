@@ -1,7 +1,7 @@
-// proxy.js – StreamVault Release Proxy v1.0
+// proxy.js – StreamVault Release Proxy v1.1
 // ─────────────────────────────────────────────────────────────────────────────
-// Corre no Render (free tier) atrás do Cloudflare Tunnel.
-// Recebe GET /{jobId}/{assetPath} → busca à Release do GitHub → devolve.
+// Corre no Render (free tier) atrás do Cloudflare CDN.
+// Recebe GET /{jobId}/{...assetPath} → busca à Release do GitHub → devolve.
 //
 // O Cloudflare cacheia a resposta por 1 ano — MISS só acontece uma vez por
 // asset por região. Após o warm todos os pedidos são servidos do cache CDN.
@@ -9,7 +9,12 @@
 // Fluxo:
 //   Player → cdn.pixgo.qzz.io/{jobId}/hls/seg.bin
 //   → Cloudflare CDN → HIT → serve (0 requests ao proxy)
-//   → MISS → tunnel → proxy (Render) → GitHub Release → cacheia 1 ano
+//   → MISS → proxy (Render) → GitHub Release asset → cacheia 1 ano
+//
+// Path: /{jobId}/{...subpath}  — o filename é sempre o último segmento.
+//   {jobId}/hls/seg00001.bin   → asset "seg00001.bin"  na Release {jobId}
+//   {jobId}/master.m3u8        → asset "master.m3u8"
+//   {jobId}/thumbs/thumb_0.jpg → asset "thumb_0.jpg"
 //
 // Variáveis de ambiente (.env ou Render Dashboard):
 //   GITHUB_TOKEN   — PAT com scope: repo
@@ -44,7 +49,7 @@ async function ghFetch(url, extraHeaders = {}) {
       'Authorization':        `Bearer ${GITHUB_TOKEN}`,
       'Accept':               'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
-      'User-Agent':           'StreamVault-Proxy/1.0',
+      'User-Agent':           'StreamVault-Proxy/1.1',
       ...extraHeaders,
     },
   });
@@ -94,6 +99,25 @@ function startKeepAlive(port) {
   console.log(`  ✓ Keep-alive activo → ${selfUrl}`);
 }
 
+// ── Stream com backpressure ───────────────────────────────────────────────────
+// res.write() devolve false quando o buffer interno está cheio (cliente lento).
+// Sem drain, o Node acumula tudo em memória — fatal em Render free com vários
+// MISSes simultâneos de ficheiros .bin grandes.
+async function streamWithBackpressure(readable, res) {
+  const reader = readable.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const ok = res.write(value);
+      if (!ok) await new Promise(r => res.once('drain', r));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  res.end();
+}
+
 // ── Servidor HTTP ────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
 
@@ -118,17 +142,25 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(405); res.end('Method Not Allowed'); return;
   }
 
-  // Parsear path: /{jobId}/{assetPath}
+  // Parsear path: /{jobId}/{...subpath}
+  // O filename é sempre o último segmento — os assets na Release são flat.
+  // Exemplos:
+  //   /abc123/hls/seg00001.bin   → jobId=abc123  assetName=seg00001.bin
+  //   /abc123/master.m3u8        → jobId=abc123  assetName=master.m3u8
+  //   /abc123/thumbs/thumb_0.jpg → jobId=abc123  assetName=thumb_0.jpg
   const parts = urlPath.replace(/^\//, '').split('/');
   if (parts.length < 2) {
     res.writeHead(400); res.end('Bad Request'); return;
   }
 
   const jobId     = parts[0];
-  const assetPath = parts.slice(1).join('/');
-  const assetName = assetPath.split('/').pop();
+  const assetName = parts[parts.length - 1];  // sempre o último segmento
   const ext       = assetName.split('.').pop().toLowerCase();
   const mime      = MIME[ext] || 'application/octet-stream';
+
+  if (!assetName || !ext) {
+    res.writeHead(400); res.end('Bad Request'); return;
+  }
 
   if (!GITHUB_TOKEN || !GITHUB_OWNER || !GITHUB_REPO) {
     res.writeHead(500); res.end('Proxy não configurado'); return;
@@ -143,7 +175,7 @@ const server = http.createServer(async (req, res) => {
 
     const asset = assets.find(a => a.name === assetName);
     if (!asset) {
-      res.writeHead(404); res.end(`Asset não encontrado: ${assetName}`); return;
+      res.writeHead(404); res.end(`Asset não encontrado: ${assetName} em ${jobId}`); return;
     }
 
     // 2. Descarregar asset da Release
@@ -156,21 +188,19 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(502); res.end('Erro ao descarregar asset'); return;
     }
 
-    // 3. Resposta com headers de cache
+    // 3. Resposta com headers de cache imutável
     res.writeHead(200, {
       'Content-Type':  mime,
       'Cache-Control': `public, max-age=${TTL}, immutable`,
       'X-Cache':       'MISS-PROXY',
     });
 
-    // Stream do body
-    const reader = assetRes.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      res.write(value);
+    if (req.method === 'HEAD') {
+      res.end(); return;
     }
-    res.end();
+
+    // 4. Stream com backpressure — não acumula em memória
+    await streamWithBackpressure(assetRes.body, res);
 
     console.log(`[proxy] ${jobId}/${assetName} → 200`);
 
@@ -183,7 +213,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`StreamVault Release Proxy v1.0 — porta ${PORT}`);
+  console.log(`StreamVault Release Proxy v1.1 — porta ${PORT}`);
   console.log(`  ✓ Storage: ${GITHUB_OWNER}/${GITHUB_REPO}`);
 
   if (process.env.RENDER || process.env.KEEP_ALIVE === 'true') {
